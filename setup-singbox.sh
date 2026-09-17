@@ -26,6 +26,10 @@
 #   443   VLESS Reality
 #   8443  HTTPS subscription
 #
+# How to use:
+# wget https://raw.githubusercontent.com/用户名/仓库名/分支名/setup-singbox.sh
+# chmod +x singbox.sh
+# ./setup-singbox.sh
 # ============================================================
 
 set -Eeuo pipefail
@@ -1228,6 +1232,10 @@ ss -lntp |
     grep -E \
         ":443|:${SUBSCRIPTION_PORT}" \
         || true
+
+systemctl enable ufw
+systemctl start ufw
+ufw status
 
 # ============================================================
 # Final output
