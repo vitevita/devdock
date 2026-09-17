@@ -1,53 +1,76 @@
 #!/usr/bin/env bash
 
 # ============================================================
+# How to use:
+# wget https://raw.githubusercontent.com/用户名/仓库名/分支名/setup-singbox.sh && chmod +x ./singbox.sh && ./setup-singbox.sh
+# ============================================================
+
+# ============================================================
 # setup-singbox.sh
 #
-# Version: V4
+# Version: V6
 #
 # Target:
 #   Ubuntu 22.04 / 24.04
-#   Oracle Cloud VPS
 #
 # Features:
-#   - sing-box 1.14+
+#   - sing-box
 #   - VLESS + Reality + Vision
-#   - Caddy HTTPS subscription
-#   - Clash Verge Rev subscription
-#   - Hiddify subscription
+#   - Clash Verge Rev subscription file
+#   - Hiddify subscription file
+#   - POST subscriptions to remote API
+#   - JSON API request
+#   - X-Access-Token authentication
 #   - BBR + FQ
 #   - UFW
 #   - Automatic validation
-#   - Secure subscription token
 #
-# Ports:
-#   22    SSH
-#   80    Caddy ACME HTTP challenge
-#   443   VLESS Reality
-#   8443  HTTPS subscription
+# Files:
+#   /etc/sing-box/config.json
+#   /etc/sing-box/connection-info.txt
+#   /srv/singbox-subscription/clash
+#   /srv/singbox-subscription/hiddify
 #
-# How to use:
-# wget https://raw.githubusercontent.com/用户名/仓库名/分支名/setup-singbox.sh
-# chmod +x singbox.sh
-# ./setup-singbox.sh
+# Remote API:
+#   https://sub.vitevita.com/singbox/create
+#
+# POST JSON:
+#   {
+#     "ip": "...",
+#     "type": "clash",
+#     "content": "..."
+#   }
+#
+#   {
+#     "ip": "...",
+#     "type": "hiddify",
+#     "content": "..."
+#   }
+#
 # ============================================================
 
 set -Eeuo pipefail
 
-VERSION="V4"
+
+# ============================================================
+# Version
+# ============================================================
+
+VERSION="V6"
+
 
 # ============================================================
 # Configuration
 # ============================================================
 
-DOMAIN="${DOMAIN:-}"
-ACME_EMAIL="${ACME_EMAIL:-}"
-
-# Reality SNI / handshake target
 REALITY_SNI="${REALITY_SNI:-www.microsoft.com}"
 
-# HTTPS subscription port
-SUBSCRIPTION_PORT="${SUBSCRIPTION_PORT:-8443}"
+SUBSCRIPTION_API="${SUBSCRIPTION_API:-https://sub.vitevita.com/singbox/create}"
+
+SUBSCRIPTION_ACCESS_TOKEN="${SUBSCRIPTION_ACCESS_TOKEN:-singbox-sub}"
+
+API_TIMEOUT="${API_TIMEOUT:-30}"
+
 
 # ============================================================
 # Paths
@@ -56,39 +79,59 @@ SUBSCRIPTION_PORT="${SUBSCRIPTION_PORT:-8443}"
 SINGBOX_DIR="/etc/sing-box"
 
 SINGBOX_CONFIG="${SINGBOX_DIR}/config.json"
+
 SINGBOX_INFO="${SINGBOX_DIR}/connection-info.txt"
-SINGBOX_TOKEN="${SINGBOX_DIR}/subscription-token.txt"
 
 SUBSCRIPTION_ROOT="/srv/singbox-subscription"
 
-CLASH_FILE="${SUBSCRIPTION_ROOT}/clash.yaml"
-HIDDIFY_FILE="${SUBSCRIPTION_ROOT}/hiddify.txt"
+CLASH_FILE="${SUBSCRIPTION_ROOT}/clash"
 
-CADDY_DIR="/etc/caddy"
-CADDYFILE="${CADDY_DIR}/Caddyfile"
+HIDDIFY_FILE="${SUBSCRIPTION_ROOT}/hiddify"
 
 SYSCTL_FILE="/etc/sysctl.d/99-singbox-network.conf"
+
+SYSTEMD_OVERRIDE_DIR="/etc/systemd/system/sing-box.service.d"
+
+SYSTEMD_OVERRIDE="${SYSTEMD_OVERRIDE_DIR}/override.conf"
+
+
+# ============================================================
+# Temporary files
+# ============================================================
+
+CLASH_API_RESPONSE="/tmp/singbox-clash-api-response.txt"
+
+HIDDIFY_API_RESPONSE="/tmp/singbox-hiddify-api-response.txt"
+
 
 # ============================================================
 # Functions
 # ============================================================
 
 log() {
+
     echo
     echo "============================================================"
     echo "$1"
     echo "============================================================"
+    echo
+
 }
 
+
 die() {
+
     echo
     echo "============================================================"
     echo "[ERROR]"
     echo "$1"
     echo "============================================================"
     echo
+
     exit 1
+
 }
+
 
 cleanup_on_error() {
 
@@ -106,20 +149,18 @@ cleanup_on_error() {
     echo "  journalctl -u sing-box -n 100 --no-pager"
     echo
 
-    echo "Caddy:"
-    echo "  systemctl status caddy --no-pager"
-    echo
-
-    echo "Caddy logs:"
-    echo "  journalctl -u caddy -n 100 --no-pager"
-    echo
 }
+
 
 trap cleanup_on_error ERR
 
+
 command_exists() {
+
     command -v "$1" >/dev/null 2>&1
+
 }
+
 
 require_root() {
 
@@ -137,11 +178,13 @@ require_root() {
 
 }
 
+
 # ============================================================
 # Root
 # ============================================================
 
 require_root
+
 
 # ============================================================
 # Operating System
@@ -150,13 +193,18 @@ require_root
 log "Checking operating system"
 
 if [[ ! -f /etc/os-release ]]; then
+
     die "/etc/os-release not found."
+
 fi
+
 
 source /etc/os-release
 
+
 echo "OS:"
 echo "  ${PRETTY_NAME}"
+
 
 if [[ "${ID}" != "ubuntu" ]]; then
 
@@ -166,42 +214,20 @@ if [[ "${ID}" != "ubuntu" ]]; then
 
 fi
 
+
 # ============================================================
-# User configuration
+# Configuration display
 # ============================================================
-
-if [[ -z "${DOMAIN}" ]]; then
-
-    read -r -p \
-        "Enter subscription domain, e.g. sub.example.com: " \
-        DOMAIN
-
-fi
-
-if [[ -z "${DOMAIN}" ]]; then
-    die "DOMAIN cannot be empty."
-fi
-
-if [[ -z "${ACME_EMAIL}" ]]; then
-
-    read -r -p \
-        "Enter ACME email: " \
-        ACME_EMAIL
-
-fi
-
-if [[ -z "${ACME_EMAIL}" ]]; then
-    die "ACME_EMAIL cannot be empty."
-fi
 
 echo
 echo "Configuration:"
 echo
-echo "  DOMAIN            = ${DOMAIN}"
-echo "  ACME_EMAIL        = ${ACME_EMAIL}"
-echo "  REALITY_SNI       = ${REALITY_SNI}"
-echo "  SUBSCRIPTION_PORT = ${SUBSCRIPTION_PORT}"
+echo "  REALITY_SNI             = ${REALITY_SNI}"
+echo "  SUBSCRIPTION_API        = ${SUBSCRIPTION_API}"
+echo "  SUBSCRIPTION_ACCESS_TOKEN = ${SUBSCRIPTION_ACCESS_TOKEN}"
+echo "  API_TIMEOUT             = ${API_TIMEOUT}"
 echo
+
 
 # ============================================================
 # Install dependencies
@@ -219,9 +245,8 @@ apt-get install -y \
     gnupg \
     jq \
     ufw \
-    debian-keyring \
-    debian-archive-keyring \
     apt-transport-https
+
 
 # ============================================================
 # Install sing-box
@@ -233,7 +258,8 @@ if ! command_exists sing-box; then
 
     mkdir -p /etc/apt/keyrings
 
-    curl -fsSL \
+    curl \
+        -fsSL \
         https://sing-box.app/gpg.key \
         -o /etc/apt/keyrings/sagernet.asc
 
@@ -254,40 +280,11 @@ else
 
 fi
 
+
 echo
 echo "sing-box version:"
 sing-box version
 
-# ============================================================
-# Install Caddy
-# ============================================================
-
-log "Installing Caddy"
-
-if ! command_exists caddy; then
-
-    curl -1sLf \
-        'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
-        | gpg --dearmor \
-        -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-
-    curl -1sLf \
-        'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
-        > /etc/apt/sources.list.d/caddy-stable.list
-
-    apt-get update
-
-    apt-get install -y caddy
-
-else
-
-    echo "Caddy already installed."
-
-fi
-
-echo
-echo "Caddy version:"
-caddy version
 
 # ============================================================
 # Detect public IPv4
@@ -304,6 +301,7 @@ SERVER_IP="$(
         || true
 )"
 
+
 if [[ -z "${SERVER_IP}" ]]; then
 
     SERVER_IP="$(
@@ -317,13 +315,30 @@ if [[ -z "${SERVER_IP}" ]]; then
 
 fi
 
+
 if [[ -z "${SERVER_IP}" ]]; then
+
     die "Unable to detect public IPv4."
+
 fi
+
 
 echo
 echo "Public IPv4:"
 echo "  ${SERVER_IP}"
+echo
+
+
+# ============================================================
+# Validate IPv4
+# ============================================================
+
+if ! [[ "${SERVER_IP}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+
+    die "Detected server IP does not look like an IPv4 address: ${SERVER_IP}"
+
+fi
+
 
 # ============================================================
 # BBR + FQ
@@ -339,9 +354,11 @@ AVAILABLE_CC="$(
         || true
 )"
 
+
 echo
 echo "Available TCP congestion control:"
 echo "  ${AVAILABLE_CC}"
+
 
 if echo "${AVAILABLE_CC}" | grep -qw "bbr"; then
 
@@ -349,6 +366,7 @@ if echo "${AVAILABLE_CC}" | grep -qw "bbr"; then
     echo "BBR is available."
 
     cat > "${SYSCTL_FILE}" <<'EOF'
+
 # ============================================================
 # sing-box network optimization
 # ============================================================
@@ -357,7 +375,6 @@ if echo "${AVAILABLE_CC}" | grep -qw "bbr"; then
 net.ipv4.tcp_congestion_control=bbr
 
 # Fair Queueing
-# Works well with BBR packet pacing.
 net.core.default_qdisc=fq
 
 # TCP window scaling
@@ -368,6 +385,7 @@ net.ipv4.tcp_sack=1
 
 # TCP timestamps
 net.ipv4.tcp_timestamps=1
+
 EOF
 
 else
@@ -376,6 +394,7 @@ else
     echo "[WARNING] BBR is not available in the current kernel."
 
     cat > "${SYSCTL_FILE}" <<'EOF'
+
 # ============================================================
 # sing-box network optimization
 # ============================================================
@@ -391,16 +410,21 @@ net.ipv4.tcp_sack=1
 
 # TCP timestamps
 net.ipv4.tcp_timestamps=1
+
 EOF
 
 fi
 
+
 chmod 644 "${SYSCTL_FILE}"
+
 
 echo
 echo "Applying sysctl configuration..."
 
+
 sysctl --system
+
 
 CURRENT_CC="$(
     sysctl \
@@ -408,11 +432,13 @@ CURRENT_CC="$(
         net.ipv4.tcp_congestion_control
 )"
 
+
 CURRENT_QDISC="$(
     sysctl \
         -n \
         net.core.default_qdisc
 )"
+
 
 echo
 echo "TCP status:"
@@ -420,12 +446,17 @@ echo
 echo "  Congestion control : ${CURRENT_CC}"
 echo "  Default qdisc      : ${CURRENT_QDISC}"
 
+
 if echo "${AVAILABLE_CC}" | grep -qw "bbr"; then
 
     if [[ "${CURRENT_CC}" == "bbr" ]]; then
+
         echo "  BBR                 : ENABLED"
+
     else
+
         echo "  BBR                 : NOT ACTIVE"
+
     fi
 
 else
@@ -434,11 +465,17 @@ else
 
 fi
 
+
 if [[ "${CURRENT_QDISC}" == "fq" ]]; then
+
     echo "  FQ                  : ENABLED"
+
 else
+
     echo "  FQ                  : ${CURRENT_QDISC}"
+
 fi
+
 
 # ============================================================
 # Generate VLESS / Reality credentials
@@ -446,40 +483,47 @@ fi
 
 log "Generating VLESS / Reality credentials"
 
+
 UUID="$(
     cat /proc/sys/kernel/random/uuid
 )"
 
+
 REALITY_KEYS="$(
     sing-box generate reality-keypair
 )"
+
 
 PRIVATE_KEY="$(
     echo "${REALITY_KEYS}" |
         awk '/PrivateKey:/ {print $2}'
 )"
 
+
 PUBLIC_KEY="$(
     echo "${REALITY_KEYS}" |
         awk '/PublicKey:/ {print $2}'
 )"
 
+
 if [[ -z "${PRIVATE_KEY}" ]]; then
+
     die "Failed to generate Reality private key."
+
 fi
 
+
 if [[ -z "${PUBLIC_KEY}" ]]; then
+
     die "Failed to generate Reality public key."
+
 fi
+
 
 SHORT_ID="$(
     openssl rand -hex 8
 )"
 
-# 32 random bytes = 64 hex characters
-SUB_TOKEN="$(
-    openssl rand -hex 32
-)"
 
 echo
 echo "Generated:"
@@ -487,7 +531,8 @@ echo
 echo "  UUID       = ${UUID}"
 echo "  Public Key = ${PUBLIC_KEY}"
 echo "  Short ID   = ${SHORT_ID}"
-echo "  Sub Token  = ${SUB_TOKEN}"
+echo
+
 
 # ============================================================
 # Create directories
@@ -495,26 +540,38 @@ echo "  Sub Token  = ${SUB_TOKEN}"
 
 log "Creating directories"
 
+
 mkdir -p "${SINGBOX_DIR}"
+
 mkdir -p "${SUBSCRIPTION_ROOT}"
-mkdir -p "${CADDY_DIR}"
+
 
 # ============================================================
-# IMPORTANT:
-# Make sure /etc/sing-box contains ONLY runtime config files
-# that we explicitly use.
+# Remove schema.json
 #
-# We intentionally DO NOT generate schema.json here.
+# IMPORTANT:
+# sing-box must explicitly load config.json.
+#
+# This prevents:
+#
+#   /etc/sing-box/schema.json
+#
+# from accidentally being interpreted as runtime configuration.
 # ============================================================
+
+log "Cleaning sing-box directory"
+
 
 rm -f \
     "${SINGBOX_DIR}/schema.json"
+
 
 # ============================================================
 # sing-box configuration
 # ============================================================
 
 log "Creating sing-box configuration"
+
 
 cat > "${SINGBOX_CONFIG}" <<EOF
 {
@@ -563,21 +620,29 @@ cat > "${SINGBOX_CONFIG}" <<EOF
 }
 EOF
 
-chmod 600 "${SINGBOX_CONFIG}"
 
-chown root:root "${SINGBOX_CONFIG}"
+chmod 600 \
+    "${SINGBOX_CONFIG}"
+
+
+chown root:root \
+    "${SINGBOX_CONFIG}"
+
 
 # ============================================================
-# Validate sing-box config
+# Validate sing-box configuration
 # ============================================================
 
 log "Validating sing-box configuration"
 
+
 sing-box check \
     -c "${SINGBOX_CONFIG}"
 
+
 echo
 echo "sing-box configuration: OK"
+
 
 # ============================================================
 # Generate VLESS URI
@@ -585,11 +650,18 @@ echo "sing-box configuration: OK"
 
 VLESS_URL="vless://${UUID}@${SERVER_IP}:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${REALITY_SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp#VLESS-Reality"
 
+
 # ============================================================
 # Create Clash subscription
+#
+# IMPORTANT:
+# File name is exactly:
+#
+#   /srv/singbox-subscription/clash
 # ============================================================
 
 log "Creating Clash subscription"
+
 
 cat > "${CLASH_FILE}" <<EOF
 mixed-port: 7890
@@ -647,264 +719,162 @@ rules:
   - MATCH,PROXY
 EOF
 
+
 # ============================================================
 # Create Hiddify subscription
+#
+# IMPORTANT:
+# File name is exactly:
+#
+#   /srv/singbox-subscription/hiddify
 # ============================================================
 
 log "Creating Hiddify subscription"
+
 
 printf '%s\n' \
     "${VLESS_URL}" \
     > "${HIDDIFY_FILE}"
 
+
 # ============================================================
-# Secure subscription directory
+# Subscription file permissions
 # ============================================================
 
-log "Configuring subscription permissions"
+log "Configuring subscription file permissions"
 
-# Caddy runs as:
-#
-#   caddy:caddy
-#
-# The caddy user needs:
-#
-#   x -> directory traversal
-#   r -> file read
-#
-# It does NOT need write permission.
 
 chown root:root \
-    "${SUBSCRIPTION_ROOT}"
+    "${SUBSCRIPTION_ROOT}" \
+    "${CLASH_FILE}" \
+    "${HIDDIFY_FILE}"
+
 
 chmod 755 \
     "${SUBSCRIPTION_ROOT}"
 
-chown root:root \
-    "${CLASH_FILE}" \
-    "${HIDDIFY_FILE}"
 
 chmod 644 \
     "${CLASH_FILE}" \
     "${HIDDIFY_FILE}"
 
+
 # ============================================================
-# Verify Caddy read access
+# Validate subscription files
 # ============================================================
 
-log "Testing Caddy subscription file access"
+log "Validating subscription files"
 
-if ! sudo -u caddy test -r "${CLASH_FILE}"; then
-    die "Caddy cannot read ${CLASH_FILE}"
-fi
 
-if ! sudo -u caddy test -r "${HIDDIFY_FILE}"; then
-    die "Caddy cannot read ${HIDDIFY_FILE}"
-fi
+if [[ ! -f "${CLASH_FILE}" ]]; then
 
-if ! sudo -u caddy cat \
-    "${CLASH_FILE}" \
-    >/dev/null; then
-
-    die "Caddy cannot read Clash YAML."
+    die "Clash subscription file was not created."
 
 fi
 
-if ! sudo -u caddy cat \
-    "${HIDDIFY_FILE}" \
-    >/dev/null; then
 
-    die "Caddy cannot read Hiddify subscription."
+if [[ ! -s "${CLASH_FILE}" ]]; then
+
+    die "Clash subscription file is empty."
 
 fi
+
+
+if [[ ! -f "${HIDDIFY_FILE}" ]]; then
+
+    die "Hiddify subscription file was not created."
+
+fi
+
+
+if [[ ! -s "${HIDDIFY_FILE}" ]]; then
+
+    die "Hiddify subscription file is empty."
+
+fi
+
+
+if ! grep -q "VLESS-Reality" "${CLASH_FILE}"; then
+
+    die "Expected VLESS-Reality entry was not found in Clash file."
+
+fi
+
+
+if ! grep -q "^vless://" "${HIDDIFY_FILE}"; then
+
+    die "Expected VLESS URI was not found in Hiddify file."
+
+fi
+
 
 echo
-echo "Caddy file permissions: OK"
-
-# ============================================================
-# Save subscription token
-# ============================================================
-
-printf '%s\n' \
-    "${SUB_TOKEN}" \
-    > "${SINGBOX_TOKEN}"
-
-chown root:root \
-    "${SINGBOX_TOKEN}"
-
-chmod 600 \
-    "${SINGBOX_TOKEN}"
-
-# ============================================================
-# Caddy configuration
-# ============================================================
-
-log "Creating Caddy configuration"
-
-cat > "${CADDYFILE}" <<EOF
-{
-    email ${ACME_EMAIL}
-}
-
-${DOMAIN}:${SUBSCRIPTION_PORT} {
-
-    # ========================================================
-    # Clash Verge Rev
-    # ========================================================
-
-    @clash path /sub/${SUB_TOKEN}/clash
-
-    handle @clash {
-
-        rewrite * /clash.yaml
-
-        root * ${SUBSCRIPTION_ROOT}
-
-        header {
-            Content-Type "text/yaml; charset=utf-8"
-            Content-Disposition "inline"
-            Cache-Control "no-store, no-cache, must-revalidate"
-            Pragma "no-cache"
-            X-Content-Type-Options "nosniff"
-        }
-
-        file_server
-    }
-
-    # ========================================================
-    # Hiddify
-    # ========================================================
-
-    @hiddify path /sub/${SUB_TOKEN}/hiddify
-
-    handle @hiddify {
-
-        rewrite * /hiddify.txt
-
-        root * ${SUBSCRIPTION_ROOT}
-
-        header {
-            Content-Type "text/plain; charset=utf-8"
-            Content-Disposition "inline"
-            Cache-Control "no-store, no-cache, must-revalidate"
-            Pragma "no-cache"
-            X-Content-Type-Options "nosniff"
-        }
-
-        file_server
-    }
-
-    # ========================================================
-    # Reject all other paths
-    # ========================================================
-
-    handle {
-        respond "Not Found" 404
-    }
-}
-EOF
-
-chmod 644 \
-    "${CADDYFILE}"
-
-chown root:root \
-    "${CADDYFILE}"
-
-# ============================================================
-# Validate Caddy
-# ============================================================
-
-log "Validating Caddy configuration"
-
-caddy validate \
-    --config "${CADDYFILE}" \
-    --adapter caddyfile
-
+echo "Subscription files:"
 echo
-echo "Caddy configuration: OK"
+echo "  Clash:"
+echo "    ${CLASH_FILE}"
+echo
+echo "  Hiddify:"
+echo "    ${HIDDIFY_FILE}"
+echo
 
-# ============================================================
-# IMPORTANT SYSTEMD CHECK
-#
-# Make sure sing-box explicitly loads config.json.
-#
-# This prevents schema.json / other JSON files from accidentally
-# being interpreted as runtime configuration.
-# ============================================================
-
-log "Checking sing-box systemd service"
-
-SINGBOX_SERVICE_FILE=""
-
-if [[ -f /lib/systemd/system/sing-box.service ]]; then
-    SINGBOX_SERVICE_FILE="/lib/systemd/system/sing-box.service"
-elif [[ -f /usr/lib/systemd/system/sing-box.service ]]; then
-    SINGBOX_SERVICE_FILE="/usr/lib/systemd/system/sing-box.service"
-fi
-
-if [[ -n "${SINGBOX_SERVICE_FILE}" ]]; then
-
-    echo
-    echo "sing-box service:"
-    echo "  ${SINGBOX_SERVICE_FILE}"
-
-    if grep -q \
-        -- "-c ${SINGBOX_CONFIG}" \
-        "${SINGBOX_SERVICE_FILE}"; then
-
-        echo
-        echo "sing-box systemd configuration: OK"
-
-    else
-
-        echo
-        echo "[WARNING]"
-        echo "Installed sing-box service does not explicitly"
-        echo "reference ${SINGBOX_CONFIG}."
-
-        echo
-        echo "Current ExecStart:"
-        grep "ExecStart=" \
-            "${SINGBOX_SERVICE_FILE}" \
-            || true
-
-        echo
-        echo "This will be fixed with an explicit systemd override."
-
-    fi
-
-fi
 
 # ============================================================
 # Create explicit systemd override
+#
+# IMPORTANT:
+# Always explicitly run:
+#
+#   /usr/bin/sing-box run -c /etc/sing-box/config.json
+#
+# This prevents sing-box from loading schema.json or another
+# JSON file automatically.
 # ============================================================
 
 log "Configuring sing-box systemd service"
 
-mkdir -p \
-    /etc/systemd/system/sing-box.service.d
 
-cat > \
-    /etc/systemd/system/sing-box.service.d/override.conf \
-    <<EOF
+mkdir -p \
+    "${SYSTEMD_OVERRIDE_DIR}"
+
+
+cat > "${SYSTEMD_OVERRIDE}" <<EOF
 [Service]
 ExecStart=
 ExecStart=/usr/bin/sing-box run -c ${SINGBOX_CONFIG}
 EOF
 
+
 chmod 644 \
-    /etc/systemd/system/sing-box.service.d/override.conf
+    "${SYSTEMD_OVERRIDE}"
+
 
 systemctl daemon-reload
 
+
 # ============================================================
-# Enable services
+# Show effective systemd configuration
 # ============================================================
 
-log "Enabling services"
+echo
+echo "Effective sing-box ExecStart:"
+echo
+
+
+systemctl cat sing-box 2>/dev/null |
+    grep "ExecStart=" \
+    || true
+
+
+# ============================================================
+# Enable sing-box
+# ============================================================
+
+log "Enabling sing-box service"
+
 
 systemctl enable sing-box
-systemctl enable caddy
+
 
 # ============================================================
 # Start sing-box
@@ -912,9 +882,12 @@ systemctl enable caddy
 
 log "Starting sing-box"
 
+
 systemctl restart sing-box
 
+
 sleep 2
+
 
 if ! systemctl is-active --quiet sing-box; then
 
@@ -931,36 +904,34 @@ if ! systemctl is-active --quiet sing-box; then
 
 fi
 
+
 echo
 echo "sing-box: ACTIVE"
 
+
 # ============================================================
-# Start Caddy
+# Check listening port
 # ============================================================
 
-log "Starting Caddy"
+log "Checking sing-box listening port"
 
-systemctl restart caddy
 
-sleep 3
-
-if ! systemctl is-active --quiet caddy; then
+if ! ss -lntp | grep -q ":443"; then
 
     echo
-    echo "Caddy failed to start."
+    echo "[WARNING]"
+    echo "Port 443 is not detected in listening sockets."
     echo
 
-    journalctl \
-        -u caddy \
-        -n 100 \
-        --no-pager
+    ss -lntp || true
 
-    die "Caddy startup failed."
+else
+
+    echo
+    echo "Port 443: LISTENING"
 
 fi
 
-echo
-echo "Caddy: ACTIVE"
 
 # ============================================================
 # Configure UFW
@@ -968,43 +939,241 @@ echo "Caddy: ACTIVE"
 
 log "Configuring UFW"
 
+
 ufw allow 22/tcp
-ufw allow 80/tcp
+
 ufw allow 443/tcp
-ufw allow "${SUBSCRIPTION_PORT}/tcp"
+
 
 ufw --force enable
+
 
 echo
 echo "UFW:"
 ufw status
 
-# ============================================================
-# Check listening ports
-# ============================================================
-
-log "Checking listening ports"
-
-echo
-
-ss -lntp |
-    grep -E \
-        ":443|:${SUBSCRIPTION_PORT}" \
-        || true
 
 # ============================================================
-# Subscription URLs
+# POST subscription to remote API
+#
+# Request:
+#
+# POST https://sub.vitevita.com/singbox/create
+#
+# Headers:
+#
+# X-Access-Token: singbox-sub
+# Content-Type: application/json
+#
+# JSON:
+#
+# {
+#   "ip": "...",
+#   "type": "clash",
+#   "content": "..."
+# }
+#
 # ============================================================
 
-CLASH_URL="https://${DOMAIN}:${SUBSCRIPTION_PORT}/sub/${SUB_TOKEN}/clash"
+post_subscription() {
 
-HIDDIFY_URL="https://${DOMAIN}:${SUBSCRIPTION_PORT}/sub/${SUB_TOKEN}/hiddify"
+    local TYPE="$1"
+
+    local FILE="$2"
+
+    local RESPONSE_FILE="$3"
+
+    local JSON_FILE
+
+    local HTTP_CODE
+
+    local CONTENT
+
+
+    if [[ ! -f "${FILE}" ]]; then
+
+        die "Subscription file does not exist: ${FILE}"
+
+    fi
+
+
+    if [[ ! -s "${FILE}" ]]; then
+
+        die "Subscription file is empty: ${FILE}"
+
+    fi
+
+
+    echo
+    echo "Preparing ${TYPE} subscription..."
+
+    echo "  File:"
+    echo "    ${FILE}"
+
+    echo "  API:"
+    echo "    ${SUBSCRIPTION_API}"
+
+    echo "  Server IP:"
+    echo "    ${SERVER_IP}"
+
+    echo "  Type:"
+    echo "    ${TYPE}"
+
+
+    # --------------------------------------------------------
+    # Read complete text content
+    # --------------------------------------------------------
+
+    CONTENT="$(<"${FILE}")"
+
+
+    if [[ -z "${CONTENT}" ]]; then
+
+        die "${TYPE} subscription content is empty."
+
+    fi
+
+
+    # --------------------------------------------------------
+    # Build JSON using jq
+    #
+    # This safely handles:
+    #
+    #   newlines
+    #   quotes
+    #   backslashes
+    #   special characters
+    #
+    # --------------------------------------------------------
+
+    JSON_FILE="$(mktemp)"
+
+
+    jq -n \
+        --arg ip "${SERVER_IP}" \
+        --arg type "${TYPE}" \
+        --arg content "${CONTENT}" \
+        '{
+            ip: $ip,
+            type: $type,
+            content: $content
+        }' \
+        > "${JSON_FILE}"
+
+
+    echo
+    echo "Generated JSON:"
+    echo
+
+
+    jq . "${JSON_FILE}"
+
+
+    # --------------------------------------------------------
+    # POST JSON
+    # --------------------------------------------------------
+
+    echo
+    echo "Sending ${TYPE} subscription to remote API..."
+
+
+    HTTP_CODE="$(
+        curl \
+            -sS \
+            -X POST \
+            --max-time "${API_TIMEOUT}" \
+            -H "X-Access-Token: ${SUBSCRIPTION_ACCESS_TOKEN}" \
+            -H "Content-Type: application/json" \
+            --data-binary "@${JSON_FILE}" \
+            -o "${RESPONSE_FILE}" \
+            -w "%{http_code}" \
+            "${SUBSCRIPTION_API}" \
+            || true
+    )"
+
+
+    rm -f "${JSON_FILE}"
+
+
+    echo
+    echo "API HTTP status:"
+    echo
+    echo "  ${HTTP_CODE}"
+
+
+    echo
+    echo "API response:"
+    echo "------------------------------------------------------------"
+
+
+    if [[ -f "${RESPONSE_FILE}" ]]; then
+
+        cat "${RESPONSE_FILE}"
+
+    fi
+
+
+    echo
+    echo "------------------------------------------------------------"
+
+
+    if [[ "${HTTP_CODE}" != "200" ]] &&
+       [[ "${HTTP_CODE}" != "201" ]] &&
+       [[ "${HTTP_CODE}" != "204" ]]; then
+
+        die \
+            "${TYPE} subscription POST failed. HTTP status: ${HTTP_CODE}"
+
+    fi
+
+
+    echo
+    echo "${TYPE} subscription POST: OK"
+
+}
+
+
+# ============================================================
+# POST Clash subscription
+# ============================================================
+
+log "Uploading Clash subscription"
+
+
+post_subscription \
+    "clash" \
+    "${CLASH_FILE}" \
+    "${CLASH_API_RESPONSE}"
+
+
+# ============================================================
+# POST Hiddify subscription
+# ============================================================
+
+log "Uploading Hiddify subscription"
+
+
+post_subscription \
+    "hiddify" \
+    "${HIDDIFY_FILE}" \
+    "${HIDDIFY_API_RESPONSE}"
+
+
+# ============================================================
+# Remove temporary API responses
+# ============================================================
+
+rm -f \
+    "${CLASH_API_RESPONSE}" \
+    "${HIDDIFY_API_RESPONSE}"
+
 
 # ============================================================
 # Save connection information
 # ============================================================
 
 log "Saving connection information"
+
 
 cat > "${SINGBOX_INFO}" <<EOF
 sing-box ${VERSION}
@@ -1038,17 +1207,28 @@ ${SHORT_ID}
 
 
 ============================================================
-CLASH VERGE REV
+SUBSCRIPTION FILES
 ============================================================
 
-${CLASH_URL}
+Clash:
+/srv/singbox-subscription/clash
+
+Hiddify:
+/srv/singbox-subscription/hiddify
 
 
 ============================================================
-HIDDIFY
+REMOTE SUBSCRIPTION API
 ============================================================
 
-${HIDDIFY_URL}
+API:
+${SUBSCRIPTION_API}
+
+Clash:
+POST type=clash
+
+Hiddify:
+POST type=hiddify
 
 
 ============================================================
@@ -1070,24 +1250,6 @@ ${CURRENT_QDISC}
 
 
 ============================================================
-SUBSCRIPTION TOKEN
-============================================================
-
-${SUB_TOKEN}
-
-
-============================================================
-IMPORTANT
-============================================================
-
-Reality Private Key:
-NOT INCLUDED
-
-The subscription URL contains a secret token.
-Do not publish it publicly.
-
-
-============================================================
 FILES
 ============================================================
 
@@ -1097,110 +1259,48 @@ ${SINGBOX_CONFIG}
 connection info:
 ${SINGBOX_INFO}
 
-subscription token:
-${SINGBOX_TOKEN}
-
 Clash:
 ${CLASH_FILE}
 
 Hiddify:
 ${HIDDIFY_FILE}
 
-Caddy:
-${CADDYFILE}
-
 Network sysctl:
 ${SYSCTL_FILE}
 
+systemd override:
+${SYSTEMD_OVERRIDE}
+
+
+============================================================
+IMPORTANT
+============================================================
+
+The remote subscription API requires:
+
+X-Access-Token:
+${SUBSCRIPTION_ACCESS_TOKEN}
+
+Keep this access token private.
+
+Reality Private Key:
+NOT INCLUDED
+
+The Reality private key is stored only inside:
+
+${SINGBOX_CONFIG}
 
 ============================================================
 EOF
 
+
 chmod 600 \
     "${SINGBOX_INFO}"
+
 
 chown root:root \
     "${SINGBOX_INFO}"
 
-# ============================================================
-# Local subscription test
-# ============================================================
-
-log "Testing HTTPS subscription"
-
-echo
-echo "Testing:"
-echo
-echo "  ${CLASH_URL}"
-echo
-
-sleep 3
-
-TEST_FILE="/tmp/singbox-subscription-test.txt"
-
-HTTP_CODE="$(
-    curl \
-        -k \
-        -L \
-        -s \
-        -o "${TEST_FILE}" \
-        -w "%{http_code}" \
-        --max-time 20 \
-        "${CLASH_URL}" \
-        || true
-)"
-
-echo
-echo "HTTP status:"
-echo "  ${HTTP_CODE}"
-
-if [[ "${HTTP_CODE}" == "200" ]]; then
-
-    echo
-    echo "Subscription endpoint: OK"
-
-    if grep -q \
-        "VLESS-Reality" \
-        "${TEST_FILE}"; then
-
-        echo "Clash YAML content: OK"
-
-    else
-
-        echo
-        echo "[WARNING]"
-        echo "HTTP 200 received, but expected Clash"
-        echo "configuration was not detected."
-
-    fi
-
-else
-
-    echo
-    echo "[WARNING]"
-    echo "Subscription did not return HTTP 200."
-
-    echo
-    echo "Possible causes:"
-    echo
-    echo "  - DNS does not point to this VPS"
-    echo "  - Oracle Cloud blocks TCP ${SUBSCRIPTION_PORT}"
-    echo "  - UFW blocks TCP ${SUBSCRIPTION_PORT}"
-    echo "  - Caddy certificate is not ready"
-    echo "  - Incorrect DNS AAAA record"
-    echo "  - Caddy configuration problem"
-
-    echo
-    echo "Check:"
-    echo
-    echo "  systemctl status caddy --no-pager"
-    echo
-    echo "  journalctl -u caddy -n 100 --no-pager"
-
-fi
-
-rm -f \
-    "${TEST_FILE}"
 
 # ============================================================
 # Final validation
@@ -1208,34 +1308,81 @@ rm -f \
 
 log "Final validation"
 
+
 echo
 echo "sing-box:"
 systemctl is-active sing-box || true
 
+
 echo
-echo "Caddy:"
-systemctl is-active caddy || true
+echo "sing-box configuration:"
+sing-box check \
+    -c "${SINGBOX_CONFIG}"
+
 
 echo
 echo "BBR:"
 sysctl -n \
     net.ipv4.tcp_congestion_control
 
+
 echo
 echo "FQ:"
 sysctl -n \
     net.core.default_qdisc
 
+
 echo
 echo "Listening ports:"
 ss -lntp |
-    grep -E \
-        ":443|:${SUBSCRIPTION_PORT}" \
-        || true
+    grep ":443" \
+    || true
 
-systemctl enable ufw
-systemctl start ufw
+
+echo
+echo "UFW:"
 ufw status
+
+
+# ============================================================
+# Validate subscription files one more time
+# ============================================================
+
+echo
+echo "Subscription files:"
+echo
+
+
+echo "Clash:"
+ls -lh \
+    "${CLASH_FILE}"
+
+
+echo
+echo "Hiddify:"
+ls -lh \
+    "${HIDDIFY_FILE}"
+
+
+# ============================================================
+# Verify systemd override
+# ============================================================
+
+echo
+echo "systemd override:"
+echo
+
+
+if [[ -f "${SYSTEMD_OVERRIDE}" ]]; then
+
+    cat "${SYSTEMD_OVERRIDE}"
+
+else
+
+    echo "[WARNING] systemd override not found."
+
+fi
+
 
 # ============================================================
 # Final output
@@ -1246,8 +1393,8 @@ echo
 echo "============================================================"
 echo "              sing-box ${VERSION} COMPLETE"
 echo "============================================================"
-
 echo
+
 echo "Server:"
 echo "  ${SERVER_IP}"
 
@@ -1261,26 +1408,44 @@ echo "  ${REALITY_SNI}"
 
 echo
 echo "============================================================"
-echo "CLASH VERGE REV SUBSCRIPTION"
+echo "SUBSCRIPTION FILES"
 echo "============================================================"
+echo
+
+echo "Clash:"
+echo "  ${CLASH_FILE}"
 
 echo
-echo "${CLASH_URL}"
+echo "Hiddify:"
+echo "  ${HIDDIFY_FILE}"
 
 echo
 echo "============================================================"
-echo "HIDDIFY SUBSCRIPTION"
+echo "REMOTE API"
 echo "============================================================"
+echo
+
+echo "API:"
+echo "  ${SUBSCRIPTION_API}"
 
 echo
-echo "${HIDDIFY_URL}"
+echo "Clash:"
+echo "  POST type=clash"
+
+echo
+echo "Hiddify:"
+echo "  POST type=hiddify"
+
+echo
+echo "Access Token:"
+echo "  ${SUBSCRIPTION_ACCESS_TOKEN}"
 
 echo
 echo "============================================================"
 echo "DIRECT VLESS URI"
 echo "============================================================"
-
 echo
+
 echo "${VLESS_URL}"
 
 echo
@@ -1310,10 +1475,6 @@ echo "connection info:"
 echo "  ${SINGBOX_INFO}"
 
 echo
-echo "subscription token:"
-echo "  ${SINGBOX_TOKEN}"
-
-echo
 echo "Clash:"
 echo "  ${CLASH_FILE}"
 
@@ -1322,12 +1483,12 @@ echo "Hiddify:"
 echo "  ${HIDDIFY_FILE}"
 
 echo
-echo "Caddy:"
-echo "  ${CADDYFILE}"
-
-echo
 echo "Network:"
 echo "  ${SYSCTL_FILE}"
+
+echo
+echo "systemd:"
+echo "  ${SYSTEMD_OVERRIDE}"
 
 echo
 echo "============================================================"
@@ -1338,9 +1499,7 @@ echo
 echo "Make sure Oracle Cloud VCN / NSG / Security List allows:"
 echo
 echo "  TCP 22"
-echo "  TCP 80"
 echo "  TCP 443"
-echo "  TCP ${SUBSCRIPTION_PORT}"
 
 echo
 echo "============================================================"
@@ -1348,7 +1507,10 @@ echo "SECURITY"
 echo "============================================================"
 
 echo
-echo "The subscription URL contains a secret token."
+echo "The API access token is:"
+echo
+echo "  ${SUBSCRIPTION_ACCESS_TOKEN}"
+echo
 echo "Do NOT publish it."
 
 echo
@@ -1357,8 +1519,23 @@ echo
 echo "  ${SINGBOX_CONFIG}"
 
 echo
+echo "============================================================"
+echo
 echo "${VERSION} setup completed."
 echo
+echo "View connection information:"
+echo
+echo "  cat /etc/sing-box/connection-info.txt"
+echo
+echo "Clash subscription content:"
+echo
+echo "  cat /srv/singbox-subscription/clash"
+echo
+echo "Hiddify subscription content:"
+echo
+echo "  cat /srv/singbox-subscription/hiddify"
+echo
+echo "============================================================"
 
 echo
 echo "cat /etc/sing-box/connection-info.txt to view connection"
