@@ -4,7 +4,7 @@
 # How to use:
 # wget https://raw.githubusercontent.com/vitevita/devdock/main/setup-singbox.sh && chmod +x ./setup-singbox.sh && ./setup-singbox.sh
 # RUN it on Ubuntu and IPV4 needed
-# use https://www.the-qrcode-generator.com/ to generate QRcode to scan by mobile
+# use https://www.the-qrcode-generator.com/ to generate QRcode to scan by mobile for https://....-hiddify
 # ============================================================
 
 # ============================================================
